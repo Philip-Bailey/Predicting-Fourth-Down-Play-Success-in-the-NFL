@@ -1,0 +1,475 @@
+```{r setup, include=FALSE}
+library(doParallel)
+library(dplyr)
+library(randomForest)
+library(caret)
+library(ggplot2)
+library(mgcv)
+library(pROC)
+library(ranger)
+library(class)
+data <- read.csv("X:/Coding/Rstudio/R Projects/Stat 435/Final Project (2)/playbyplay/playbyplay.csv")
+
+
+data1 <- data %>%
+  select(1:161)
+
+
+
+data1 <- data1 %>%
+  mutate(pass_length_n = case_when(
+    pass_length == "short" ~ 1,
+    pass_length == "deep" ~ 2,
+    TRUE ~ NA_real_
+  )) %>%
+  select(-pass_length)
+
+
+data1 <- data1 %>%
+  mutate(pass_location_n = case_when(
+    pass_location == "left" ~ 1,
+    pass_location == "right" ~ 2,
+    TRUE ~ NA_real_  
+  )) %>%
+  select(-pass_location )
+  
+data1 <- data1 %>%
+  mutate(run_location_n = case_when(
+    run_location == "left" ~ 1,
+    run_location == "middle" ~ 2,
+    run_location == "middle" ~ 3,
+    TRUE ~ NA_real_ 
+  )) %>%
+  select(-run_location)  
+
+data1 <- data1 %>%
+  mutate(run_gap_n = case_when(
+    run_gap == "end" ~ 1,
+    run_gap == "guard" ~ 2,
+    run_gap == "tackle" ~ 3,
+    TRUE ~ NA_real_  
+  )) %>%
+  select(-run_gap)
+
+data1 <- data1 %>%
+  mutate(play_type_n = case_when(
+    play_type == "run" ~ 1,
+    play_type == "pass" ~ 2,
+    TRUE ~ NA_real_  
+  ))
+
+data1 <- data1 %>%
+  mutate(game_half_n = case_when(
+    game_half == "Half1" ~ 1,
+    game_half == "Half2" ~ 2,
+    TRUE ~ NA_real_ 
+  )) %>%
+  select(-game_half)
+
+data1 <- data1 %>%
+  mutate(posteam_type = case_when(
+    posteam_type == "home" ~ 1,
+    posteam_type == "away" ~ 2,
+    TRUE ~ 0 
+  )) %>%
+  select(-home_team, -away_team, -posteam, -defteam)
+
+
+  
+ 
+
+```
+
+setting up for predictions
+```{r}
+
+
+fourth_down_data <- data1 %>%
+  filter(down == 4)
+
+
+fourth_down_data <- fourth_down_data %>%
+  filter(play_type %in% c("run", "pass")) %>%
+  mutate(success = ifelse(yards_gained >= ydstogo, 1, 0)) 
+
+
+fourth_down_data <- fourth_down_data %>% filter(!is.na(success))
+
+```
+
+
+```{r}
+run_data <- fourth_down_data %>%
+  filter(play_type == "run")
+
+pass_data <- fourth_down_data %>%
+  filter(play_type == "pass")
+
+set.seed(123)
+trainIndex_run <- createDataPartition(run_data$success, p = 0.8, list = FALSE)
+train_run <- run_data[trainIndex_run, ]
+test_run  <- run_data[-trainIndex_run, ]
+
+logistic_run <- glm(success ~ posteam_type + yardline_100 + quarter_seconds_remaining + 
+                       game_seconds_remaining + game_half_n + ydstogo + 
+                       no_huddle + run_location_n + run_gap_n + ydsnet,
+                     data = train_run,
+                     family = binomial)
+
+summary(logistic_run)
+
+
+run_preds_prob <- predict(logistic_run, newdata = test_run, type = "response")
+
+run_preds_class <- ifelse(run_preds_prob > 0.6, 1, 0)
+
+
+cm_run <- confusionMatrix(as.factor(run_preds_class), as.factor(test_run$success))
+print(cm_run)
+
+
+run_roc <- roc(test_run$success, run_preds_prob)
+run_auc <- auc(run_roc)
+cat("Run Model AUC:", run_auc, "\n")
+plot(run_roc, main = paste("Run Model ROC - AUC:", round(run_auc, 3)))
+
+
+
+```
+The logistic regression analysis shows varibles yardline_100, ydstogo, run_gap_n, and ydsnet are statistically significant. The model achieved an accuracy of 75.9%, with a balanced accuracy of 67.97%. The AUC score of 0.664 suggest that it performs slightly better than a random guess and has some predictive capabilities but needs to be improved. 
+
+```{r}
+
+set.seed(123)
+trainIndex_pass <- createDataPartition(pass_data$success, p = 0.8, list = FALSE)
+train_pass <- pass_data[trainIndex_pass, ]
+test_pass  <- pass_data[-trainIndex_pass, ]
+
+logistic_pass <- glm(success ~ posteam_type + yardline_100 + quarter_seconds_remaining + 
+                        game_seconds_remaining + game_half_n + ydstogo + 
+                        no_huddle + qb_dropback + qb_scramble + 
+                        pass_length_n + pass_location_n +ydsnet,
+                      data = train_pass,
+                      family = binomial)
+
+summary(logistic_pass)
+
+
+pass_preds_prob <- predict(logistic_pass, newdata = test_pass, type = "response")
+
+pass_preds_class <- ifelse(pass_preds_prob > 0.6, 1, 0)
+
+
+cm_pass <- confusionMatrix(as.factor(pass_preds_class), as.factor(test_pass$success))
+print(cm_pass)
+
+
+pass_roc <- roc(test_pass$success, pass_preds_prob)
+pass_auc <- auc(pass_roc)
+cat("Pass Model AUC:", pass_auc, "\n")
+plot(pass_roc, main = paste("Pass Model ROC - AUC:", round(pass_auc, 3)))
+
+
+```
+The logisitic regression on pass plays performed slightly worse with an accuracy of 74.5% but performed significatly better with an auc of 0.784. This shows that its able to distinguish between success and failure with moderate accuracy. The same variables were significant but instead of run gap, pass length was added.
+
+
+
+
+```{r}
+
+
+gam_model <- gam(
+  success ~ posteam_type + yardline_100 + quarter_seconds_remaining +
+    game_seconds_remaining + game_half_n + s(ydstogo) + 
+    no_huddle + qb_dropback + qb_scramble + pass_length_n + pass_location_n,
+  data = train_pass,
+  family = binomial(link = "logit")
+)
+
+summary(gam_model)
+plot(gam_model, shade = TRUE, pages = 1)
+
+smoothed_values <- predict(gam_model, newdata = train_pass, type = "terms")
+
+smoothed_data_pass <- data.frame(
+  ydstogo = train_pass$ydstogo,
+  s_ydstogo = smoothed_values[, "s(ydstogo)"]
+)
+
+
+zero_crossing <- smoothed_data_pass[which.min(abs(smoothed_data_pass$s_ydstogo)), ]
+print(zero_crossing)
+```
+While the model performed poorly in explaining the data it was able to identify that
+6 yards seems to be the tipping point where the ydstogo predictor doesn't affect the pass data. I was curious about this and thought about exploring this more for the future models. Possiblly hold yds to go constant and see how it would impact the results. 
+
+
+```{r}
+gam_model <- gam(
+  success ~ posteam_type + yardline_100 + quarter_seconds_remaining + 
+                       game_seconds_remaining + game_half_n + s(ydstogo) + ydsnet + 
+                       no_huddle + run_location_n + run_gap_n,
+  data = train_run,
+  family = binomial(link = "logit")
+)
+
+summary(gam_model)
+plot(gam_model, shade = TRUE, pages = 1)
+
+
+smoothed_values <- predict(gam_model, newdata = train_run, type = "terms")
+
+
+smoothed_data_run <- data.frame(
+  ydstogo = train_run$ydstogo,
+  s_ydstogo = smoothed_values[, "s(ydstogo)"]  
+)
+
+
+zero_crossing_run <- smoothed_data_run[which.min(abs(smoothed_data_run$s_ydstogo)), ]
+print(zero_crossing_run)
+```
+This model also performed poorly but similar to the last model I was able to determine 2 yards seems to be the tipping point where the ydstogo predictor doesn't affect the data.
+
+
+
+
+```{r}
+
+
+set.seed(123)
+trainIndex_run <- createDataPartition(run_data$success, p = 0.8, list = FALSE)
+train_run <- run_data[trainIndex_run, ]
+test_run <- run_data[-trainIndex_run, ]
+
+
+train_run$success <- factor(train_run$success, levels = c("0", "1"))
+test_run$success <- factor(test_run$success, levels = c("0", "1"))
+
+
+train_run$run_location_n[is.na(train_run$run_location_n)] <- "Unknown"
+train_run$run_gap_n[is.na(train_run$run_gap_n)] <- "Unknown"
+test_run$run_location_n[is.na(test_run$run_location_n)] <- "Unknown"
+test_run$run_gap_n[is.na(test_run$run_gap_n)] <- "Unknown"
+
+
+train_run$run_location_n <- factor(train_run$run_location_n)
+train_run$run_gap_n <- factor(train_run$run_gap_n)
+test_run$run_location_n <- factor(test_run$run_location_n)
+test_run$run_gap_n <- factor(test_run$run_gap_n)
+
+
+train_run <- train_run[!is.na(train_run$game_half_n), ]
+
+
+
+rf_run <- randomForest(
+  success ~ posteam_type + yardline_100 + quarter_seconds_remaining + 
+    game_seconds_remaining + game_half_n + ydstogo + ydsnet + 
+    no_huddle + run_location_n + run_gap_n,
+  data = train_run,
+  ntree = 400,
+  mtry = 9,
+  importance = TRUE
+)
+
+
+rf_run_preds <- predict(rf_run, newdata = test_run)  
+
+
+conf_matrix <- confusionMatrix(rf_run_preds, test_run$success)
+print(conf_matrix)
+
+
+varImpPlot(rf_run)
+```
+I conducted a random forest model to predict run play success on fourth down plays. From this I determined ydsnet and yardline_100 were again significant. It has a moderate sensitivity of 45.45% and a high specificity of 87.8%. The overall accuarcy was 71.22%. This model has a hard time predicting successes. 
+
+```{r}
+
+
+set.seed(123)
+trainIndex_pass <- createDataPartition(pass_data$success, p = 0.8, list = FALSE)
+train_pass <- pass_data[trainIndex_pass, ]
+test_pass <- pass_data[-trainIndex_pass, ]
+
+
+train_pass$success <- factor(train_pass$success, levels = c("0", "1"))
+test_pass$success <- factor(test_pass$success, levels = c("0", "1"))
+
+
+train_pass$pass_length_n[is.na(train_pass$pass_length_n)] <- "Unknown"
+train_pass$pass_location_n[is.na(train_pass$pass_location_n)] <- "Unknown"
+test_pass$pass_length_n[is.na(test_pass$pass_length_n)] <- "Unknown"
+test_pass$pass_location_n[is.na(test_pass$pass_location_n)] <- "Unknown"
+
+
+train_pass$pass_length_n <- factor(train_pass$pass_length_n)
+train_pass$pass_location_n <- factor(train_pass$pass_location_n)
+test_pass$pass_length_n <- factor(test_pass$pass_length_n)
+test_pass$pass_location_n <- factor(test_pass$pass_location_n)
+
+
+train_pass <- train_pass[!is.na(train_pass$game_half_n), ]
+
+
+cv_control <- trainControl(method = "cv", number = 10, classProbs = TRUE)
+
+
+
+rf_pass <- randomForest(success ~ posteam_type + ydstogo + yardline_100 + quarter_seconds_remaining + 
+                          game_seconds_remaining + game_half_n + 
+                          no_huddle + pass_length_n + pass_location_n + ydsnet,
+                        data = train_pass,
+                        ntree = 300,
+                        trControl = cv_control,
+                        mtry = 7,
+                        importance = TRUE)
+
+
+rf_pass_preds <- predict(rf_pass, newdata = test_pass)
+
+
+conf_matrix_pass <- confusionMatrix(rf_pass_preds, test_pass$success)
+print(conf_matrix_pass)
+
+
+varImpPlot(rf_pass)
+
+
+```
+Above I conducted a random forest model to predict the outcome on fourth down pass plays. This model had and accuracy of 78.32%, sensitivity of 81.82%, and a specificity of 73.62%. Outside of the usual ydsnet and yardline 100 pass length was a top predictor. It performed significantly better than the model for run plays.
+
+
+
+
+
+```{r}
+
+
+
+
+set.seed(123)
+trainIndex_pass <- createDataPartition(fourth_down_data$success, p = 0.8, list = FALSE)
+train_pass <- fourth_down_data[trainIndex_pass, ]
+test_pass <- fourth_down_data[-trainIndex_pass, ]
+
+
+train_pass$success <- factor(train_pass$success, levels = c("0", "1"))
+test_pass$success <- factor(test_pass$success, levels = c("0", "1"))
+
+
+train_pass$pass_length_n[is.na(train_pass$pass_length_n)] <- "Unknown"
+train_pass$pass_location_n[is.na(train_pass$pass_location_n)] <- "Unknown"
+test_pass$pass_length_n[is.na(test_pass$pass_length_n)] <- "Unknown"
+test_pass$pass_location_n[is.na(test_pass$pass_location_n)] <- "Unknown"
+train_pass$run_location_n[is.na(train_pass$run_location_n)] <- "Unknown"
+train_pass$run_gap_n[is.na(train_pass$run_gap_n)] <- "Unknown"
+test_pass$run_location_n[is.na(test_pass$run_location_n)] <- "Unknown"
+test_pass$run_gap_n[is.na(test_pass$run_gap_n)] <- "Unknown"
+
+
+train_pass$pass_length_n <- factor(train_pass$pass_length_n)
+train_pass$pass_location_n <- factor(train_pass$pass_location_n)
+test_pass$pass_length_n <- factor(test_pass$pass_length_n)
+test_pass$pass_location_n <- factor(test_pass$pass_location_n)
+train_pass$run_location_n <- factor(train_pass$run_location_n)
+train_pass$run_gap_n <- factor(train_pass$run_gap_n)
+test_pass$run_location_n <- factor(test_pass$run_location_n)
+test_pass$run_gap_n <- factor(test_pass$run_gap_n)
+
+important_vars <- c("game_half_n", "half_seconds_remaining", 
+                    "score_differential", "goal_to_go")
+
+for (var in important_vars) {
+  train_pass <- train_pass[!is.na(train_pass[[var]]), ]
+}
+
+
+
+if (!is.factor(train_pass$goal_to_go)) {
+  train_pass$goal_to_go <- factor(train_pass$goal_to_go, levels = c(0,1))
+  test_pass$goal_to_go <- factor(test_pass$goal_to_go, levels = c(0,1))
+}
+
+cv_control <- trainControl(method = "cv", number = 10, classProbs = TRUE)
+for (var in important_vars) {
+  test_pass <- test_pass[!is.na(test_pass[[var]]), ]
+}
+
+rf_pass <- randomForest(
+  success ~ posteam_type + ydstogo + yardline_100 + quarter_seconds_remaining + 
+    game_seconds_remaining + half_seconds_remaining + game_half_n + score_differential + shotgun + pass_length_n + pass_location_n + goal_to_go + posteam_type + run_gap_n + run_location_n + play_type + ydsnet,
+  data = train_pass,
+  ntree = 300,
+  mtry = 11,
+  importance = TRUE
+)
+
+
+rf_pass_preds <- predict(rf_pass, newdata = test_pass)
+
+
+conf_matrix_pass <- confusionMatrix(rf_pass_preds, test_pass$success)
+print(conf_matrix_pass)
+
+
+varImpPlot(rf_pass)
+
+
+
+
+```
+I created a random forest model to predict the outcome of a pass or run play on fourth down.
+
+
+``` {r}
+total_cores <- parallel::detectCores()
+cl <- makeCluster(total_cores - 1) # Create cluster using all but one core
+registerDoParallel(cl)     
+train_pass$success <- factor(train_pass$success, levels = c("0", "1"), labels = c("Failure", "Success"))
+test_pass$success <- factor(test_pass$success, levels = c("0", "1"), labels = c("Failure", "Success"))
+tune_grid <- expand.grid(mtry = c(5, 7, 10, 12),
+                         splitrule = c("gini", "extratrees"), 
+                         min.node.size = c(1, 5, 10))
+
+
+
+
+rf_tuned <- train(
+  success ~ posteam_type + ydstogo + yardline_100 + quarter_seconds_remaining + 
+    game_seconds_remaining + half_seconds_remaining + game_half_n + score_differential + shotgun + pass_length_n + pass_location_n + goal_to_go + run_gap_n + run_location_n + play_type + ydsnet,
+  data = train_pass,
+  method = "ranger",
+  trControl = trainControl(method = "cv", number = 5, classProbs = TRUE),
+  tuneGrid = tune_grid,
+  importance = 'impurity'
+)
+
+
+rf_tuned$bestTune
+best_model <- rf_tuned$finalModel
+
+
+```
+
+Above I created another random forest model using the ranger method to predict the success fourth down plays. I also performed a grid search to optimize the models hyperparameters. 
+
+``` {r}
+
+
+rf_preds <- predict(rf_tuned, newdata = test_pass)
+
+confusionMatrix(rf_preds, test_pass$success)
+
+varImp(rf_tuned)
+
+
+```
+This model performed the best out of all of the model with 74% accuracy on identifying the failure cases correctly and a 77% accuracy on identifying success correctly. The Kappa score of 0.5246 shows moderate success between predictions and actual labels.
+
+
+For this project I examine a data set of football plays from 2008 to 2015. This data set contained over 250 columns to start out with. The question I decided to investigate if I could predict the success of fourth down plays. I framed the problem as a classification problem determining whether a fourth down play resulted in a success with the team getting a first down or failing to go the required distance and turning over the ball. For this problem I initially started with logistic regression models for run and pass plays separately. This gave me a based line for the possibility of predicting the results. Next I used  Generalized additive models GAMs to identify the tipping point where the distance from the first down line would neither positively nor negatively effect the outcome. After this I used a random forest model to see if it would perform better than the logistic regression. The model was able to improve accuracy, balanced accuracy and kappa scores. I then decided to optimize the model with ranger package and performed a grid search to determine the best hyper parameters. It achieved approximately a 74%  accuracy identifying failures and an 77% accuracy determining successes. The kappa score of .52 represent a moderate agreement between the predictions and the actual outcomes. If I had more time I would have like to improve this further. Yards to go(ydstogo), net yards on the drive (ydsnet), what yardline the play took place at (yardline_100) and play type whether it was a run or pass play were important in determining the outcomes. In a practical application coaches understanding the statistical likely hood of a pass or run play based on yards to go could provide them with critical information that could lead to winning a game. An area to improve upon would be the handling of missing data because certain variables had very little data to go off of. Adding more context could be helpful such as what type of defense the opposing defense is running and proficiency of players on the team. For example if the team has a great running back and offensive line this could shift the probability. For example the eagles were renowned for their offensive lines ability to convert of fourth downs through their "tush push" strategy. If you don't believe me search this up its quite interesting. Overall I used logistic regression, GAMs, and random forest models to effectively predict fourth-down success. This analysis provides a foundation for my research into the statistical side of football.
+
+
